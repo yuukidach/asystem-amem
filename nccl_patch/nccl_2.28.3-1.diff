@@ -1,0 +1,395 @@
+diff --git a/src/Makefile b/src/Makefile
+index be026cc..bf88f52 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -56,7 +56,7 @@ PKGTARGET  := $(PKGCONFIGFILE)
+ LIBOBJ     := $(LIBSRCFILES:%.cc=$(OBJDIR)/%.o)
+ BINOBJ     := $(BINSRCFILES:%.cc=$(OBJDIR)/%.o)
+ DEPFILES   := $(LIBOBJ:%.o=%.d) $(BINOBJ:%.o=%.d)
+-LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl
++LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl -fPIC -L../../../lib -lamem_nccl
+ INCPLUGIN  := include/plugin
+ 
+ DEVMANIFEST := $(BUILDDIR)/obj/device/manifest
+@@ -94,7 +94,7 @@ $(INCDIR)/nccl.h : nccl.h.in ../makefiles/version.mk
+ $(LIBDIR)/$(LIBTARGET): $(LIBOBJ) $(DEVMANIFEST)
+ 	@printf "Linking    %-35s > %s\n" $(LIBTARGET) $@
+ 	mkdir -p $(LIBDIR)
+-	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -o $@ $(LIBOBJ) $$(cat $(DEVMANIFEST)) $(LDFLAGS)
++	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -lamem_nccl -o $@ $(LIBOBJ) $$(cat $(DEVMANIFEST)) $(LDFLAGS)
+ 	ln -sf $(LIBSONAME) $(LIBDIR)/$(LIBNAME)
+ 	ln -sf $(LIBTARGET) $(LIBDIR)/$(LIBSONAME)
+ 
+@@ -145,7 +145,7 @@ $(PKGDIR)/%.pc : %.pc
+ $(OBJDIR)/%.o : %.cc $(INCTARGETS)
+ 	@printf "Compiling  %-35s > %s\n" $< $@
+ 	mkdir -p `dirname $@`
+-	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -c $< -o $@
++	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -std=c++17 -DAMEM_PLUGIN -I../../../amem_nccl_plugin -Iinclude -I$(INCPLUGIN) -c $< -o $@
+ 	@$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -M $< > $(@:%.o=%.d.tmp)
+ 	@sed "0,/^.*:/s//$(subst /,\/,$@):/" $(@:%.o=%.d.tmp) > $(@:%.o=%.d)
+ 	@sed -e 's/.*://' -e 's/\\$$//' < $(@:%.o=%.d.tmp) | fmt -1 | \
+diff --git a/src/allocator.cc b/src/allocator.cc
+index f5638b9..64670c8 100644
+--- a/src/allocator.cc
++++ b/src/allocator.cc
+@@ -9,6 +9,10 @@
+ #include "group.h"
+ #include "nvtx.h"
+ 
++#ifdef AMEM_PLUGIN
++#include "amem_nccl.h"
++#endif
++
+ NCCL_API(ncclResult_t, ncclMemAlloc, void **ptr, size_t size);
+ ncclResult_t  ncclMemAlloc(void **ptr, size_t size) {
+   NCCL_NVTX3_FUNC_RANGE;
+@@ -70,6 +74,15 @@ ncclResult_t  ncclMemAlloc(void **ptr, size_t size) {
+     CUCHECK(cuMemAddressReserve((CUdeviceptr*)ptr, handleSize, memGran, 0, 0));
+     /* Map the virtual address range to the physical allocation */
+     CUCHECK(cuMemMap((CUdeviceptr)*ptr, handleSize, 0, handle, 0));
++
++    #ifdef AMEM_PLUGIN
++    if (requestedHandleTypes & CU_MEM_HANDLE_TYPE_FABRIC) {
++      amem_addAllocInfo((CUdeviceptr)*ptr, handleSize, AMEM_TYPE_CUMEM_LOCAL_FABRIC, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_FABRIC);
++    } else {
++      amem_addAllocInfo((CUdeviceptr)*ptr, handleSize, AMEM_TYPE_CUMEM_LOCAL_POSIX, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_POSIX);
++    }
++    #endif
++
+     /* Now allow RW access to the newly mapped memory */
+     for (int i = 0; i < dcnt; ++i) {
+       int p2p = 0;
+@@ -464,3 +477,49 @@ ncclResult_t ncclShadowPoolToHost(struct ncclShadowPool* pool, void* devObj, voi
+   *hostObj = obj->hostObj;
+   return ncclSuccess;
+ }
++
++#ifdef AMEM_PLUGIN
++NCCL_API(ncclResult_t, ncclPause, ncclComm_t *comm);
++ncclResult_t ncclPause(ncclComm_t* comm) {
++  ncclResult_t ret = ncclSuccess;
++  NCCL_NVTX3_FUNC_RANGE;
++
++  amem_memPause(getpid(), 0);
++  TRACE_CALL("ncclPause()");
++  return ret;
++};
++
++NCCL_API(ncclResult_t, ncclResume, ncclComm_t * comm);
++ncclResult_t ncclResume(ncclComm_t* comm) {
++  ncclResult_t ret = ncclSuccess;
++  NCCL_NVTX3_FUNC_RANGE;
++
++  amem_memResume(getpid(), 0);
++  TRACE_CALL("ncclResume()");
++
++  return ret;
++}
++
++NCCL_API(ncclResult_t, ncclMemStats);
++ncclResult_t ncclMemStats() {
++  ncclResult_t ret = ncclSuccess;
++  NCCL_NVTX3_FUNC_RANGE;
++
++  amem_dumpAllocStats();
++  TRACE_CALL("ncclMemStats()");
++
++  return ret;
++}
++
++NCCL_API(ncclResult_t, ncclSetGroupID, int);
++ncclResult_t ncclSetGroupID(int id) {
++  int ret_ = amem_setGroupID(id);
++  return (ncclResult_t) ret_;
++}
++
++NCCL_API(ncclResult_t, ncclGetGroupID, int*);
++ncclResult_t ncclGetGroupID(int *id) {
++  amem_getGroupID(id);
++  return ncclSuccess;
++}
++#endif
+diff --git a/src/collectives.cc b/src/collectives.cc
+index ca69c9a..8e7b8d1 100644
+--- a/src/collectives.cc
++++ b/src/collectives.cc
+@@ -10,6 +10,10 @@
+ #include "nccl.h"
+ #include "nvtx_payload_schemas.h"
+ 
++#ifdef AMEM_PLUGIN
++#include "amem_nccl.h"
++#endif
++
+ const char* ncclFuncToString(ncclFunc_t fn) {
+   switch (fn) {
+   case ncclFuncAllGather: return "AllGather";
+@@ -81,6 +85,9 @@ NCCL_API(ncclResult_t, ncclAllGather, const void* sendbuff, void* recvbuff, size
+     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
+     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   // Just pass the size of one message and not the total bytes sent/received.
+   NVTX3_FUNC_WITH_PARAMS(AllGather, NcclNvtxParamsAllGather,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, sendcount * ncclTypeSize(datatype)));
+@@ -108,6 +115,9 @@ NCCL_API(ncclResult_t, ncclAllReduce, const void* sendbuff, void* recvbuff, size
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream);
+ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(AllReduce, NcclNvtxParamsAllReduce,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), op));
+ 
+@@ -121,6 +131,9 @@ NCCL_API(ncclResult_t, ncclBroadcast, const void* sendbuff, void* recvbuff, size
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Broadcast, NcclNvtxParamsBroadcast,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), root));
+ 
+@@ -134,6 +147,9 @@ NCCL_API(ncclResult_t, ncclBcast, void* buff, size_t count, ncclDataType_t datat
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   return ncclBroadcast(buff, buff, count, datatype, root, comm, stream);
+ }
+ 
+@@ -154,6 +170,9 @@ NCCL_API(ncclResult_t, ncclReduce, const void* sendbuff, void* recvbuff, size_t
+     ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,
+     ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Reduce, NcclNvtxParamsReduce,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), root, op));
+ 
+@@ -167,6 +186,9 @@ NCCL_API(ncclResult_t, ncclReduceScatter, const void* sendbuff, void* recvbuff,
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream);
+ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recvcount,
+     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(ReduceScatter, NcclNvtxParamsReduceScatter,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, recvcount * ncclTypeSize(datatype), op));
+ 
+@@ -193,6 +215,9 @@ NCCL_API(ncclResult_t, ncclSend, const void* sendbuff, size_t count, ncclDataTyp
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Send, NcclNvtxParamsSendRecv,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), peer));
+ 
+@@ -206,6 +231,9 @@ NCCL_API(ncclResult_t, ncclRecv, void* recvbuff, size_t count, ncclDataType_t da
+     ncclComm_t comm, cudaStream_t stream);
+ ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer,
+     ncclComm_t comm, cudaStream_t stream) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   NVTX3_FUNC_WITH_PARAMS(Recv, NcclNvtxParamsSendRecv,
+     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), peer));
+ 
+diff --git a/src/group.cc b/src/group.cc
+index aa28244..dc1cd13 100644
+--- a/src/group.cc
++++ b/src/group.cc
+@@ -15,6 +15,10 @@
+ #include "profiler.h"
+ #include "nvtx.h"
+ 
++#ifdef AMEM_PLUGIN
++#include "amem_nccl.h"
++#endif
++
+ #define GROUP_MAX_RECLAIM_STEPS 10
+ 
+ __thread int ncclGroupDepth = 0; // depth of ncclGroupStart nesting
+@@ -92,6 +96,9 @@ ncclResult_t ncclAsyncJobComplete(struct ncclAsyncJob* job) {
+ 
+ NCCL_API(ncclResult_t, ncclGroupStart);
+ ncclResult_t ncclGroupStart() {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   ncclResult_t ret = ncclSuccess;
+   NCCL_NVTX3_FUNC_RANGE;
+ 
+@@ -102,6 +109,9 @@ ncclResult_t ncclGroupStart() {
+ 
+ NCCL_API(ncclResult_t, ncclGroupEnd);
+ ncclResult_t ncclGroupEnd() {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   ncclResult_t ret = ncclSuccess;
+   NCCL_NVTX3_FUNC_RANGE;
+   NCCLCHECKGOTO(ncclGroupEndInternal(), ret, exit);
+@@ -112,6 +122,9 @@ exit:
+ 
+ NCCL_API(ncclResult_t, ncclGroupSimulateEnd, ncclSimInfo_t* simInfo);
+ ncclResult_t ncclGroupSimulateEnd(ncclSimInfo_t* simInfo) {
++#ifdef AMEM_PLUGIN
++  amem_checkPaused();
++#endif
+   ncclResult_t ret = ncclSuccess;
+   NCCL_NVTX3_FUNC_RANGE;
+   NCCLCHECKGOTO(ncclGroupEndInternal(simInfo), ret, exit);
+diff --git a/src/include/alloc.h b/src/include/alloc.h
+index 021c91f..1c0c4d5 100644
+--- a/src/include/alloc.h
++++ b/src/include/alloc.h
+@@ -22,6 +22,10 @@
+ #include "cudawrap.h"
+ #endif
+ 
++#ifdef AMEM_PLUGIN
++#include "amem_nccl.h"
++#endif
++
+ uint64_t clockNano(); // from utils.h with which we have a circular dependency
+ 
+ template<typename T>
+@@ -190,6 +194,9 @@ static inline ncclResult_t ncclCuMemAllocAddr(void **ptr, CUmemGenericAllocation
+   accessDesc.location.id = cudaDev;
+   accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+   CUCHECK(cuMemSetAccess((CUdeviceptr)*ptr, size, &accessDesc, 1));
++  #ifdef AMEM_PLUGIN
++  amem_addAllocInfo((CUdeviceptr)ptr, size, AMEM_TYPE_CUMEM_LOCAL, cudaDev, *handleIn, -1, 0, NULL, AMEM_CALLER_NCCL_DEFAULT);
++  #endif
+   TRACE(NCCL_ALLOC, "CuMem Map Size %zu pointer %p handle %llx", size, *ptr, *handleIn);
+   return result;
+ }
+@@ -198,6 +205,9 @@ static inline ncclResult_t ncclCuMemFreeAddr(void *ptr) {
+   if (ptr == NULL) return ncclSuccess;
+   ncclResult_t result = ncclSuccess;
+   size_t size = 0;
++  #ifdef AMEM_PLUGIN
++  amem_delAllocInfo((CUdeviceptr) ptr, 0, 0);
++  #endif
+   CUCHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+   CUCHECK(cuMemUnmap((CUdeviceptr)ptr, size));
+   CUCHECK(cuMemAddressFree((CUdeviceptr)ptr, size));
+@@ -230,6 +240,9 @@ static inline ncclResult_t ncclCuMemAlloc(void **ptr, CUmemGenericAllocationHand
+   CUCHECK(cuMemAddressReserve((CUdeviceptr *)ptr, size, granularity, 0, 0));
+   /* Map the virtual address range to the physical allocation */
+   CUCHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
++  #ifdef AMEM_PLUGIN
++  amem_addAllocInfo((CUdeviceptr)*ptr, size, AMEM_TYPE_CUMEM_LOCAL, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_P2P);
++  #endif
+   /* Now allow RW access to the newly mapped memory */
+   accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+   accessDesc.location.id = currentDev;
+@@ -245,6 +258,9 @@ static inline ncclResult_t ncclCuMemFree(void *ptr) {
+   ncclResult_t result = ncclSuccess;
+   CUmemGenericAllocationHandle handle;
+   size_t size = 0;
++  #ifdef AMEM_PLUGIN
++  amem_delAllocInfo((CUdeviceptr) ptr, 0, 0);
++  #endif
+   CUCHECK(cuMemRetainAllocationHandle(&handle, ptr));
+   CUCHECK(cuMemRelease(handle));
+   CUCHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+diff --git a/src/include/p2p.h b/src/include/p2p.h
+index e49c45d..73752fe 100644
+--- a/src/include/p2p.h
++++ b/src/include/p2p.h
+@@ -60,7 +60,7 @@ struct ncclIpcRegInfo {
+ 
+ ncclResult_t ncclP2pAllocateShareableBuffer(size_t size, int directMap, ncclIpcDesc *ipcDesc, void **ptr);
+ ncclResult_t ncclP2pFreeShareableBuffer(ncclIpcDesc *ipcDesc);
+-ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr);
++ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr, int peerDev=-1);
+ ncclResult_t ncclIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut);
+ ncclResult_t ncclIpcGraphRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut, void* cleanupQueuePtr, int* nCleanupQueueElts);
+ 
+diff --git a/src/nccl.h.in b/src/nccl.h.in
+index 0c53c82..c9944d5 100644
+--- a/src/nccl.h.in
++++ b/src/nccl.h.in
+@@ -564,6 +564,22 @@ ncclResult_t pncclGroupEnd();
+ ncclResult_t  ncclGroupSimulateEnd(ncclSimInfo_t* simInfo);
+ ncclResult_t pncclGroupSimulateEnd(ncclSimInfo_t* simInfo);
+ 
++/*
++ * NCCL Pause()/Resume() APIs by AMem NCCL-plugin that release (then re-alloc) phy GPU memory while keeping dptr unchanged
++ * Pause(): offload (P2P buffer is optional) then release phy addr including references from peer, virtual dptr keep intact 
++ * Resume(): basically redo, e.g., alloc new phy addr, remap to existing dptr, preload data, notifer peer etc, thus everything is restored
++ * Notes: 
++ * - both APIs are blocked until all release/offload/preload run to complete
++ * - APIs shall be invoked in-order and in-pair e.g. Pause() then Resume()
++ * - for inter-GPU state consistency, it shall be handled by caller frameworks like SGLang, Megatron-LM etc
++ * - input argument comm currently is unused, just set as NULL
++ */
++ncclResult_t ncclPause(ncclComm_t * comm = NULL);
++ncclResult_t ncclResume(ncclComm_t* comm = NULL);
++ncclResult_t ncclMemStats();
++ncclResult_t ncclSetGroupID(int id);
++ncclResult_t ncclGetGroupID(int* id);
++
+ #ifdef __cplusplus
+ } // end extern "C"
+ #endif
+diff --git a/src/transport/p2p.cc b/src/transport/p2p.cc
+index d9fd01d..e2bb60f 100644
+--- a/src/transport/p2p.cc
++++ b/src/transport/p2p.cc
+@@ -14,6 +14,10 @@
+ #include "shm.h"
+ #include "register_inline.h"
+ 
++#ifdef AMEM_PLUGIN
++#include "amem_nccl.h"
++#endif
++
+ enum p2pType { P2P_DIRECT, P2P_INTERMEDIATE, P2P_IPC, P2P_CUMEM };
+ 
+ struct ncclP2pBuff {
+@@ -247,7 +251,7 @@ ncclResult_t ncclP2pFreeShareableBuffer(ncclIpcDesc *ipcDesc) {
+   return ncclSuccess;
+ }
+ 
+-ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr) {
++ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr, int peerDev) {
+   if (ncclCuMemEnable()) {
+ #if CUDART_VERSION >= 11030
+     // cuMem API support
+@@ -279,6 +283,14 @@ ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_
+     }
+     CUCHECK(cuMemAddressReserve(&dptr, size, /* alignment */ 0, /* addr */ 0, /* flags */ 0));
+     CUCHECK(cuMemMap(dptr, size, /* offset */ 0, handle, /* flags */ 0));
++    #ifdef AMEM_PLUGIN
++    if (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
++      // cuDesc(union of data/handle, 8B) is the src handle
++      amem_addAllocInfo(dptr, size, AMEM_TYPE_CUMEM_PEER_POSIX, comm->cudaDev, handle, peerDev, (uint64_t)cuDesc->data, comm, AMEM_CALLER_NCCL_P2P_PEER);
++    } else {
++      amem_addAllocInfo(dptr, size, AMEM_TYPE_CUMEM_PEER_FABRIC, comm->cudaDev, handle, peerDev, (uint64_t)cuDesc, comm, AMEM_CALLER_NCCL_P2P_PEER);
++    }
++    #endif
+ 
+     TRACE(NCCL_P2P, "Imported shareable buffer size %zu handle 0x%llx dptr %p", size, handle, (void*)dptr);
+ 
+@@ -350,7 +362,7 @@ static ncclResult_t p2pMap(struct ncclComm *comm, struct ncclProxyConnector* pro
+     }
+   } else {
+     // Different PID
+-    NCCLCHECK(ncclP2pImportShareableBuffer(comm, peerInfo->rank, p2pBuff->size, &p2pBuff->ipcDesc, devMem));
++    NCCLCHECK(ncclP2pImportShareableBuffer(comm, peerInfo->rank, p2pBuff->size, &p2pBuff->ipcDesc, devMem, peerInfo->cudaDev));
+     *ipcPtr = *devMem;
+   }
+   return ncclSuccess;

@@ -8,9 +8,27 @@ THIRD_NCCL=$AMEM_ROOT_DIR/third_party/nccl;
 THIRD_NCCL_TEST=$AMEM_ROOT_DIR/third_party/nccl-tests;
 
 apply_patches() {
+    # Detect NCCL version and select appropriate patch
+    cd $THIRD_NCCL
+    NCCL_VERSION=$(git describe --tags 2>/dev/null | sed 's/^v//')
+    cd $AMEM_ROOT_DIR
+    
+    # Select patch file based on NCCL version
+    if [[ "$NCCL_VERSION" == 2.28.* ]]; then
+        NCCL_PATCH_FILE="nccl_patch/nccl_2.28.3-1.diff"
+    elif [[ "$NCCL_VERSION" == 2.27.* ]]; then
+        NCCL_PATCH_FILE="nccl_patch/nccl_2.27.5-1.diff"
+    else
+        echo "Warning: Unknown NCCL version $NCCL_VERSION, trying 2.28.3 patch"
+        NCCL_PATCH_FILE="nccl_patch/nccl_2.28.3-1.diff"
+    fi
+    
+    echo "Detected NCCL version: $NCCL_VERSION"
+    echo "Using patch file: $NCCL_PATCH_FILE"
+    
     # apply patches
     PATCH_FILES=(
-        "nccl_patch/nccl_2.27.5-1.diff"
+        "$NCCL_PATCH_FILE"
         "nccl_patch/nccl-tests.diff"
     )
 
@@ -69,8 +87,11 @@ apply_patches() {
 
 build_project() {
     # build nccl
+    # Note: CUDA_INC must be set to override system's old libcudacxx in /usr/include/cuda/
     cd $THIRD_NCCL;
     make -j96 src.build \
+        CUDA_HOME=$CUDA_HOME \
+        CUDA_INC=$CUDA_HOME/include \
         NVCC_GENCODE="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100a,code=sm_100a"
     cd $AMEM_ROOT_DIR;
 
@@ -88,6 +109,8 @@ build_project() {
     # rebuild nccl with patch
     cd $THIRD_NCCL;
     make -j96 src.build \
+        CUDA_HOME=$CUDA_HOME \
+        CUDA_INC=$CUDA_HOME/include \
         NVCC_GENCODE="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100a,code=sm_100a"
     cd $AMEM_ROOT_DIR;
 
