@@ -86,7 +86,19 @@ apply_patches() {
 }
 
 build_project() {
-    # build nccl
+    # apply patches first
+    apply_patches
+
+    # build plugin first (needed by NCCL)
+    cd $AMEM_ROOT_DIR/amem_nccl_plugin;
+    make amem;
+    cd $AMEM_ROOT_DIR;
+
+    # copy lib to NCCL build dir
+    mkdir -p $THIRD_NCCL/build/lib
+    cp $AMEM_ROOT_DIR/lib/libamem_nccl.so.1 $THIRD_NCCL/build/lib
+
+    # build nccl with patch
     # Note: CUDA_INC must be set to override system's old libcudacxx in /usr/include/cuda/
     cd $THIRD_NCCL;
     make -j96 src.build \
@@ -95,32 +107,15 @@ build_project() {
         NVCC_GENCODE="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100a,code=sm_100a"
     cd $AMEM_ROOT_DIR;
 
-    # build plugin and cp lib
-    cd $AMEM_ROOT_DIR/amem_nccl_plugin;
-    make amem;
-    cd $AMEM_ROOT_DIR;
-
-    mkdir -p $THIRD_NCCL/build/lib
-    cp $AMEM_ROOT_DIR/lib/libamem_nccl.so.1 $THIRD_NCCL/build/lib
-
-    # apply patches
-    apply_patches
-
-    # rebuild nccl with patch
-    cd $THIRD_NCCL;
-    make -j96 src.build \
-        CUDA_HOME=$CUDA_HOME \
-        CUDA_INC=$CUDA_HOME/include \
-        NVCC_GENCODE="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100a,code=sm_100a"
-    cd $AMEM_ROOT_DIR;
-
-    # build nccl-tests
-    cd $THIRD_NCCL_TEST;
-    make -j96 MPI=1 \
-        MPI_HOME=${MPI_HOME:-/opt/hpcx/ompi} \
-        NCCL_HOME=$THIRD_NCCL/build \
-        NVCC_GENCODE="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100a,code=sm_100a"
-    cd $AMEM_ROOT_DIR;
+    # build nccl-tests (optional, skip if MPI not available)
+    if [ -n "$BUILD_NCCL_TESTS" ]; then
+        cd $THIRD_NCCL_TEST;
+        make -j96 MPI=1 \
+            MPI_HOME=${MPI_HOME:-/opt/hpcx/ompi} \
+            NCCL_HOME=$THIRD_NCCL/build \
+            NVCC_GENCODE="-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100a,code=sm_100a"
+        cd $AMEM_ROOT_DIR;
+    fi
 }
 
 clean_project() {

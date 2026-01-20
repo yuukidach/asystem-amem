@@ -1,13 +1,12 @@
-CUR_DIR=$(shell pwd)
-LOCAL_NCCL_DIR=$CUR_DIR/../third_party/nccl/build
-# Use CUDA_HOME from environment or default to cuda-12.8 for newer APIs
-CUDA_DIR?=/usr/local/cuda-12.8
+CUR_DIR := $(shell pwd)
+LOCAL_NCCL_DIR := $(CUR_DIR)/../third_party/nccl/build
+CUDA_DIR := $(if $(CUDA_HOME),$(CUDA_HOME),/usr/local/cuda)
 
 # may need to -I<current 2.27 NCCL.h directory>
-FLAGS = -I${LOCAL_NCCL_DIR}/include \
-   -I${CUDA_DIR}/include \
-   -L${LOCAL_NCCL_DIR}/lib \
-   -L${CUDA_DIR}/lib64 \
+FLAGS = -I$(LOCAL_NCCL_DIR)/include \
+   -I$(CUDA_DIR)/include \
+   -L$(LOCAL_NCCL_DIR)/lib \
+   -L$(CUDA_DIR)/lib64 \
    -D_GNU_SOURCE \
    -g -O2 -DNDEBUG \
    -std=c++17 \
