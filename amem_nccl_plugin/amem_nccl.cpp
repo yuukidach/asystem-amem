@@ -79,7 +79,7 @@ static void InitClientCtx(int curDev) {
 
 }
 
-void amem_dumpAllocStats(bool verbose)
+extern "C" void amem_dumpAllocStats(bool verbose)
 {
   if (amem_plugin_disable > 0) {
     return;
@@ -329,7 +329,7 @@ int amem_registerPeerInfo(CUmemGenericAllocationHandle srcHandle, CUdeviceptr pe
 }
 
 // Add additional refcount
-int amem_addRefcount(void *dptr, int refcount)
+extern "C" int amem_addRefcount(void *dptr, int refcount)
 {
   if (amem_plugin_disable > 0) {
     return 0;
@@ -449,7 +449,7 @@ int amem_delAllocInfo(CUdeviceptr dptr, CUmemGenericAllocationHandle  handle, in
 
 
 // Check pause status, show warning if necessary
-bool amem_checkPaused(bool warn)
+extern "C" bool amem_checkPaused(bool warn)
 { 
   if (amem_plugin_disable > 0) {
     return false;
@@ -464,7 +464,7 @@ bool amem_checkPaused(bool warn)
 }
 
 // Handler for mem pause
-int amem_memPause(pid_t pid, uint64_t tag)
+extern "C" int amem_memPause(pid_t pid, uint64_t tag)
 {
   LOGGER(DEBUG, "memPause: start here."); 
   if (amem_plugin_disable > 0) {
@@ -574,7 +574,7 @@ int amem_memPause(pid_t pid, uint64_t tag)
 }
 
 // Handler for mem resume
-int amem_memResume(pid_t pid, uint64_t tag)
+extern "C" int amem_memResume(pid_t pid, uint64_t tag)
 {
   LOGGER(DEBUG, "memResume: start here."); 
   if (amem_plugin_disable > 0) {
@@ -676,7 +676,7 @@ int amem_memResume(pid_t pid, uint64_t tag)
   return ret; 
 }
 
-int amem_setGroupID(int id)
+extern "C" int amem_setGroupID(int id)
 {
   int ret = 0;
   if (amem_plugin_disable > 0) {
@@ -693,7 +693,7 @@ int amem_setGroupID(int id)
   return ret;
 }
 
-void amem_getGroupID(int *id)
+extern "C" void amem_getGroupID(int *id)
 {
   if (amem_plugin_disable > 0) {
     return;

@@ -347,16 +347,37 @@ int amem_addAllocInfo(CUdeviceptr localDptr, size_t allocSz, int type, int local
 // Clean up metadata info before dptr free
 int amem_delAllocInfo(CUdeviceptr dptr, CUmemGenericAllocationHandle  handle, int caller = -1);
 
+// C API for Python ctypes binding (with default args for C++ callers like NCCL)
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Pause: do necessary offload, then release physical GPU memory (local and mapped from peer) but keep dptr unchanged
-int amem_memPause(pid_t pid, uint64_t tag = 0);
+int amem_memPause(pid_t pid, uint64_t tag
+#ifdef __cplusplus
+    = 0
+#endif
+);
 // Resume: alloc new physical GPU mem, do necessary preload, notify peer to map the new allocated mem
 // Note: pause and resume shall be invoked in-pair. both are blocked until release/offload/preload run to complete
-int amem_memResume(pid_t pid, uint64_t tag = 0);
+int amem_memResume(pid_t pid, uint64_t tag
+#ifdef __cplusplus
+    = 0
+#endif
+);
 
-void amem_dumpAllocStats(bool verbose = true);
+void amem_dumpAllocStats(bool verbose
+#ifdef __cplusplus
+    = true
+#endif
+);
 
 // Check pause status, show warning if necessary
-bool amem_checkPaused(bool warn = true);
+bool amem_checkPaused(bool warn
+#ifdef __cplusplus
+    = true
+#endif
+);
 
 // Add additional refcount
 int amem_addRefcount(void *dptr, int refcount);
@@ -365,5 +386,9 @@ int amem_addRefcount(void *dptr, int refcount);
 // after that, setting groupID is rejected
 int amem_setGroupID(int id);
 void amem_getGroupID(int* id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
